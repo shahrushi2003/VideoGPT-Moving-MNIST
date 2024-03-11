@@ -1,5 +1,15 @@
 # VideoGPT: Video Generation using VQ-VAE and Transformers
 
+# MMIST setup
+
+Run `make` to create two directories that, when missing, give issues.
+
+The `mnist_scripts` directory contains the bash scripts to train a VQVAE and a VideoGPT model and also has a script to sample the VideoGPT. Finally, it contains a Jupyter notebook to create an HDF5 format dataset (the format that the VideoGPT repository uses) from the PyTorch MovingMNIST dataset.
+
+Note that the train script, as well as the sample script contain an absolute path to a pretrained model: you'll have to update this yourself when using the script.
+
+## Original text
+
 [[Paper]](https://arxiv.org/abs/2104.10157)[[Website]](https://wilson1yan.github.io/videogpt/index.html)[[Colab]](https://colab.research.google.com/github/wilson1yan/VideoGPT/blob/master/notebooks/Using_VideoGPT.ipynb)
 Integrated to [Huggingface Spaces](https://huggingface.co/spaces) with [Gradio](https://github.com/gradio-app/gradio). See demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/VideoGPT)
 
