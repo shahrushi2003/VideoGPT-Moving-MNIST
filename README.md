@@ -1,12 +1,14 @@
 # VideoGPT: Video Generation using VQ-VAE and Transformers
 
-# MMIST setup
+## Moving MMIST + MaskGIT setup
 
 Run `make` to create two directories that, when missing, give issues.
 
 The `mnist_scripts` directory contains the bash scripts to train a VQVAE and a VideoGPT model and also has a script to sample the VideoGPT. Finally, it contains a Jupyter notebook to create an HDF5 format dataset (the format that the VideoGPT repository uses) from the PyTorch MovingMNIST dataset.
 
 Note that the train script, as well as the sample script contain an absolute path to a pretrained model: you'll have to update this yourself when using the script.
+
+Finally, the currently implementation of this VideoGPT setup uses MaskGIT for generating the frames. 
 
 ## Original text
 
