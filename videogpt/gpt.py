@@ -1,6 +1,5 @@
 import os
 import itertools
-import numpy as np
 from tqdm import tqdm
 import argparse
 
@@ -13,6 +12,8 @@ import pytorch_lightning as pl
 from .resnet import _, resnet18
 from .attention import AttentionStack, LayerNorm, AddBroadcastPosEmbed
 from .utils import shift_dim
+
+from torch_maskgit import MaskGit
 
 
 class VideoGPT(pl.LightningModule):
@@ -59,8 +60,32 @@ class VideoGPT(pl.LightningModule):
 
         self.norm = LayerNorm(args.hidden_dim, args.class_cond_dim)
 
-        self.fc_out = nn.Linear(args.hidden_dim, self.vqvae.n_codes, bias=False)
-        self.fc_out.weight.data.copy_(torch.zeros(self.vqvae.n_codes, args.hidden_dim))
+        # self.fc_out = nn.Linear(args.hidden_dim, self.vqvae.n_codes, bias=False)
+        # self.fc_out.weight.data.copy_(torch.zeros(self.vqvae.n_codes, args.hidden_dim))
+
+        MASKGIT_VOCAB_DIM = 256
+        MASKGIT_HIDDEN_DIM = int(192/2)
+        TFM_ARGS = {
+            "embed_dim": MASKGIT_HIDDEN_DIM,
+            "num_heads": 8,
+            "num_layers": 8,
+            "mlp_dim": MASKGIT_HIDDEN_DIM*4, # Can be anything
+            "dropout": 0.0,
+            "attention_dropout": 0.0,
+
+            "vocab_dim": MASKGIT_VOCAB_DIM, # Required, else the code fails
+            # "vocab_size": vocab_size, # DONT USE INTERNAL TF EMBEDDINGS AS TECO DOESNT EITHE
+            "input_dim": args.hidden_dim # Input dimensions for pre-encoded tokens
+        }
+
+        # self.shape is (t, h, w) = (16, 4, 4) but we do per frame masking
+        maskgit_shape = self.shape[1:]
+
+        self.maskgit = MaskGit(maskgit_shape,
+                               self.vqvae.n_codes,
+                               MASKGIT_VOCAB_DIM,
+                               'cosine',
+                               TFM_ARGS)
 
         # caches for faster decoding (if necessary)
         self.frame_cond_cache = None
@@ -116,7 +141,7 @@ class VideoGPT(pl.LightningModule):
 
         return samples # BCTHW in [0, 1]
 
-    def forward(self, x, targets, cond, decode_step=None, decode_idx=None):
+    def forward_without_maskgit(self, x, cond, decode_step=None, decode_idx=None):
         if self.use_frame_cond:
             if decode_step is None:
                 cond['frame_cond'] = self.cond_pos_embd(self.resnet(cond['frame_cond']))
@@ -129,7 +154,30 @@ class VideoGPT(pl.LightningModule):
         h = self.fc_in(x)
         h = self.attn_stack(h, cond, decode_step, decode_idx)
         h = self.norm(h, cond)
-        logits = self.fc_out(h)
+
+        return h
+    
+    def forward_maskgit(self, h, targets):
+        # h is now of shape: (batch, t, h, w, c)
+        dims = h.shape
+
+        # Combine the batch and time dimensions
+        h = h.view(-1, *h.shape[2:])
+        maskgit_targets = targets.view(-1, *targets.shape[2:])
+
+        logits, _, _ = self.maskgit(maskgit_targets, h)
+
+        # Split the batch and time dimensions again
+        logits = logits.view(dims[0], dims[1], *logits.shape[1:])
+
+        return logits
+    
+    def forward(self, x, targets, cond, decode_step=None, decode_idx=None):
+        h = self.forward_without_maskgit(x, cond, decode_step, decode_idx)
+        
+        # logits = self.fc_out(h)
+
+        logits = self.forward_maskgit(h, targets)
 
         loss = F.cross_entropy(shift_dim(logits, -1, 1), targets)
 
