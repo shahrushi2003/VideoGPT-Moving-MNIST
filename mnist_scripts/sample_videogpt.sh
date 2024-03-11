@@ -1,0 +1,1 @@
+python3 scripts/sample_videogpt.py --ckpt /space/ddenblanken/Projects/VideoGPT/moving_mnist_videogpt/gw2nmlas/checkpoints/epoch=34-step=5215.ckpt --n 9

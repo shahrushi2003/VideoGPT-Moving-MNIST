@@ -1,0 +1,1 @@
+python3 scripts/train_vqvae.py --embedding_dim 64 --n_codes 512 --n_hiddens 240 --n_res_layers 2 --downsample 4 4 4 --gpus 1 --num_workers 8 --batch_size 32 --data_path ../datasets/moving_mnist.h5 --resolution 64 --sequence_length 16
