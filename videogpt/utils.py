@@ -61,8 +61,13 @@ def tensor_slice(x, begin, size):
 
 import math
 import numpy as np
-import skvideo.io
 def save_video_grid(video, fname, nrow=None):
+    import skvideo
+    raise Exception("Make sure to update the path below and remove this exception!")
+    ffmpeg_path = "/space/ddenblanken/Projects/VideoGPT/ffmpeg-6.1-amd64-static/"
+    skvideo.setFFmpegPath(ffmpeg_path)
+    import skvideo.io
+
     b, c, t, h, w = video.shape
     video = video.permute(0, 2, 3, 4, 1)
     video = (video.cpu().numpy() * 255).astype('uint8')
