@@ -11,6 +11,13 @@ import torch.distributed as dist
 from .attention import MultiHeadAttention
 from .utils import shift_dim
 
+import sys
+
+sys.path.insert(0, "/content/Soft-discretization")
+
+from semivq.nn import VectorQuant
+
+
 class VQVAE(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
@@ -24,23 +31,29 @@ class VQVAE(pl.LightningModule):
         self.pre_vq_conv = SamePadConv3d(args.n_hiddens, args.embedding_dim, 1)
         self.post_vq_conv = SamePadConv3d(args.embedding_dim, args.n_hiddens, 1)
 
-        self.codebook = Codebook(args.n_codes, args.embedding_dim)
+        self.codebook = VectorQuant(
+            args.embedding_dim, args.n_codes, use_learnable_std=True
+        )
         self.save_hyperparameters()
 
     @property
     def latent_shape(self):
-        input_shape = (self.args.sequence_length, self.args.resolution,
-                       self.args.resolution)
-        return tuple([s // d for s, d in zip(input_shape,
-                                             self.args.downsample)])
+        input_shape = (
+            self.args.sequence_length,
+            self.args.resolution,
+            self.args.resolution,
+        )
+        return tuple([s // d for s, d in zip(input_shape, self.args.downsample)])
 
     def encode(self, x, include_embeddings=False):
         h = self.pre_vq_conv(self.encoder(x))
-        vq_output = self.codebook(h)
+        # print(h.shape)
+        zq, vq_dict = self.codebook(h)
+        vq_dict["q"] = vq_dict["q"].squeeze()
         if include_embeddings:
-            return vq_output['encodings'], vq_output['embeddings']
+            return vq_dict["q"], zq
         else:
-            return vq_output['encodings']
+            return vq_dict["q"]
 
     def decode(self, encodings):
         h = F.embedding(encodings, self.codebook.embeddings)
@@ -49,25 +62,27 @@ class VQVAE(pl.LightningModule):
 
     def forward(self, x):
         z = self.pre_vq_conv(self.encoder(x))
-        vq_output = self.codebook(z)
-        x_recon = self.decoder(self.post_vq_conv(vq_output['embeddings']))
+        # print(z.shape)
+        zq, vq_dict = self.codebook(z)
+        # print(vq_dict['q'].shape, zq.shape)
+        x_recon = self.decoder(self.post_vq_conv(zq))
         recon_loss = F.mse_loss(x_recon, x) / 0.06
 
-        return recon_loss, x_recon, vq_output
+        return recon_loss, x_recon, vq_dict
 
     def training_step(self, batch, batch_idx):
-        x = batch['video']
+        x = batch["video"]
         recon_loss, _, vq_output = self.forward(x)
-        commitment_loss = vq_output['commitment_loss']
+        commitment_loss = vq_output["loss"]
         loss = recon_loss + commitment_loss
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x = batch['video']
+        x = batch["video"]
         recon_loss, _, vq_output = self.forward(x)
-        self.log('val/recon_loss', recon_loss, prog_bar=True)
-        self.log('val/perplexity', vq_output['perplexity'], prog_bar=True)
-        self.log('val/commitment_loss', vq_output['commitment_loss'], prog_bar=True)
+        self.log("val/recon_loss", recon_loss, prog_bar=True)
+        self.log("val/perplexity", vq_output["perplexity"], prog_bar=True)
+        self.log("val/commitment_loss", vq_output["loss"], prog_bar=True)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=7e-4, betas=(0.9, 0.999))
@@ -75,26 +90,29 @@ class VQVAE(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = argparse.ArgumentParser(parents=[parent_parser], add_help=False)
-        parser.add_argument('--embedding_dim', type=int, default=256)
-        parser.add_argument('--n_codes', type=int, default=2048)
-        parser.add_argument('--n_hiddens', type=int, default=240)
-        parser.add_argument('--n_res_layers', type=int, default=4)
-        parser.add_argument('--downsample', nargs='+', type=int, default=(4, 4, 4))
+        parser.add_argument("--embedding_dim", type=int, default=256)
+        parser.add_argument("--n_codes", type=int, default=2048)
+        parser.add_argument("--n_hiddens", type=int, default=240)
+        parser.add_argument("--n_res_layers", type=int, default=4)
+        parser.add_argument("--downsample", nargs="+", type=int, default=(4, 4, 4))
         return parser
 
 
 class AxialBlock(nn.Module):
     def __init__(self, n_hiddens, n_head):
         super().__init__()
-        kwargs = dict(shape=(0,) * 3, dim_q=n_hiddens,
-                      dim_kv=n_hiddens, n_head=n_head,
-                      n_layer=1, causal=False, attn_type='axial')
-        self.attn_w = MultiHeadAttention(attn_kwargs=dict(axial_dim=-2),
-                                         **kwargs)
-        self.attn_h = MultiHeadAttention(attn_kwargs=dict(axial_dim=-3),
-                                         **kwargs)
-        self.attn_t = MultiHeadAttention(attn_kwargs=dict(axial_dim=-4),
-                                         **kwargs)
+        kwargs = dict(
+            shape=(0,) * 3,
+            dim_q=n_hiddens,
+            dim_kv=n_hiddens,
+            n_head=n_head,
+            n_layer=1,
+            causal=False,
+            attn_type="axial",
+        )
+        self.attn_w = MultiHeadAttention(attn_kwargs=dict(axial_dim=-2), **kwargs)
+        self.attn_h = MultiHeadAttention(attn_kwargs=dict(axial_dim=-3), **kwargs)
+        self.attn_t = MultiHeadAttention(attn_kwargs=dict(axial_dim=-4), **kwargs)
 
     def forward(self, x):
         x = shift_dim(x, 1, -1)
@@ -115,18 +133,19 @@ class AttentionResidualBlock(nn.Module):
             SamePadConv3d(n_hiddens // 2, n_hiddens, 1, bias=False),
             nn.BatchNorm3d(n_hiddens),
             nn.ReLU(),
-            AxialBlock(n_hiddens, 2)
+            AxialBlock(n_hiddens, 2),
         )
 
     def forward(self, x):
         return x + self.block(x)
 
+
 class Codebook(nn.Module):
     def __init__(self, n_codes, embedding_dim):
         super().__init__()
-        self.register_buffer('embeddings', torch.randn(n_codes, embedding_dim))
-        self.register_buffer('N', torch.zeros(n_codes))
-        self.register_buffer('z_avg', self.embeddings.data.clone())
+        self.register_buffer("embeddings", torch.randn(n_codes, embedding_dim))
+        self.register_buffer("N", torch.zeros(n_codes))
+        self.register_buffer("z_avg", self.embeddings.data.clone())
 
         self.n_codes = n_codes
         self.embedding_dim = embedding_dim
@@ -148,7 +167,7 @@ class Codebook(nn.Module):
         y = self._tile(flat_inputs)
 
         d = y.shape[0]
-        _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]
+        _k_rand = y[torch.randperm(y.shape[0])][: self.n_codes]
         if dist.is_initialized():
             dist.broadcast(_k_rand, 0)
         self.embeddings.data.copy_(_k_rand)
@@ -160,9 +179,11 @@ class Codebook(nn.Module):
         if self._need_init and self.training:
             self._init_embeddings(z)
         flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)
-        distances = (flat_inputs ** 2).sum(dim=1, keepdim=True) \
-                    - 2 * flat_inputs @ self.embeddings.t() \
-                    + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True)
+        distances = (
+            (flat_inputs**2).sum(dim=1, keepdim=True)
+            - 2 * flat_inputs @ self.embeddings.t()
+            + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True)
+        )
 
         encoding_indices = torch.argmin(distances, dim=1)
         encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(flat_inputs)
@@ -190,7 +211,7 @@ class Codebook(nn.Module):
             self.embeddings.data.copy_(encode_normalized)
 
             y = self._tile(flat_inputs)
-            _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]
+            _k_rand = y[torch.randperm(y.shape[0])][: self.n_codes]
             if dist.is_initialized():
                 dist.broadcast(_k_rand, 0)
 
@@ -202,12 +223,17 @@ class Codebook(nn.Module):
         avg_probs = torch.mean(encode_onehot, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        return dict(embeddings=embeddings_st, encodings=encoding_indices,
-                    commitment_loss=commitment_loss, perplexity=perplexity)
+        return dict(
+            embeddings=embeddings_st,
+            encodings=encoding_indices,
+            commitment_loss=commitment_loss,
+            perplexity=perplexity,
+        )
 
     def dictionary_lookup(self, encodings):
         embeddings = F.embedding(encodings, self.embeddings)
         return embeddings
+
 
 class Encoder(nn.Module):
     def __init__(self, n_hiddens, n_res_layers, downsample):
@@ -224,8 +250,7 @@ class Encoder(nn.Module):
         self.conv_last = SamePadConv3d(in_channels, n_hiddens, kernel_size=3)
 
         self.res_stack = nn.Sequential(
-            *[AttentionResidualBlock(n_hiddens)
-              for _ in range(n_res_layers)],
+            *[AttentionResidualBlock(n_hiddens) for _ in range(n_res_layers)],
             nn.BatchNorm3d(n_hiddens),
             nn.ReLU()
         )
@@ -243,8 +268,7 @@ class Decoder(nn.Module):
     def __init__(self, n_hiddens, n_res_layers, upsample):
         super().__init__()
         self.res_stack = nn.Sequential(
-            *[AttentionResidualBlock(n_hiddens)
-              for _ in range(n_res_layers)],
+            *[AttentionResidualBlock(n_hiddens) for _ in range(n_res_layers)],
             nn.BatchNorm3d(n_hiddens),
             nn.ReLU()
         )
@@ -255,8 +279,7 @@ class Decoder(nn.Module):
         for i in range(max_us):
             out_channels = 3 if i == max_us - 1 else n_hiddens
             us = tuple([2 if d > 0 else 1 for d in n_times_upsample])
-            convt = SamePadConvTranspose3d(n_hiddens, out_channels, 4,
-                                           stride=us)
+            convt = SamePadConvTranspose3d(n_hiddens, out_channels, 4, stride=us)
             self.convts.append(convt)
             n_times_upsample -= 1
 
@@ -281,13 +304,14 @@ class SamePadConv3d(nn.Module):
         # assumes that the input shape is divisible by stride
         total_pad = tuple([k - s for k, s in zip(kernel_size, stride)])
         pad_input = []
-        for p in total_pad[::-1]: # reverse since F.pad starts from last dim
+        for p in total_pad[::-1]:  # reverse since F.pad starts from last dim
             pad_input.append((p // 2 + p % 2, p // 2))
         pad_input = sum(pad_input, tuple())
         self.pad_input = pad_input
 
-        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size,
-                              stride=stride, padding=0, bias=bias)
+        self.conv = nn.Conv3d(
+            in_channels, out_channels, kernel_size, stride=stride, padding=0, bias=bias
+        )
 
     def forward(self, x):
         return self.conv(F.pad(x, self.pad_input))
@@ -303,15 +327,19 @@ class SamePadConvTranspose3d(nn.Module):
 
         total_pad = tuple([k - s for k, s in zip(kernel_size, stride)])
         pad_input = []
-        for p in total_pad[::-1]: # reverse since F.pad starts from last dim
+        for p in total_pad[::-1]:  # reverse since F.pad starts from last dim
             pad_input.append((p // 2 + p % 2, p // 2))
         pad_input = sum(pad_input, tuple())
         self.pad_input = pad_input
 
-        self.convt = nn.ConvTranspose3d(in_channels, out_channels, kernel_size,
-                                        stride=stride, bias=bias,
-                                        padding=tuple([k - 1 for k in kernel_size]))
+        self.convt = nn.ConvTranspose3d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            bias=bias,
+            padding=tuple([k - 1 for k in kernel_size]),
+        )
 
     def forward(self, x):
         return self.convt(F.pad(x, self.pad_input))
-
